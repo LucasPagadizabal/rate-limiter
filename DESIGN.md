@@ -1,10 +1,10 @@
-# Rate Limiter — Design Document
+# Rate Limiter — Documento de Diseño
 
-## Problem
+## Problema
 
-Design and implement a rate limiter that controls the rate of traffic a client can send to an API. Based on Chapter 4 of *System Design Interview* by Alex Xu.
+Diseñar e implementar un rate limiter que controle la tasa de tráfico que un cliente puede enviar a una API. Basado en el Capítulo 4 de *System Design Interview* de Alex Xu.
 
-## Architecture Overview
+## Arquitectura General
 
 ```
 ┌──────────────┐     ┌─────────────────────┐     ┌──────────────┐
@@ -23,108 +23,103 @@ Design and implement a rate limiter that controls the rate of traffic a client c
                      └─────────────────────┘
 ```
 
-### Projects
+### Proyectos
 
-| Project | Responsibility |
+| Proyecto | Responsabilidad |
 |---|---|
-| **RateLimiter.Core** | Algorithms, interfaces, no framework dependencies |
-| **RateLimiter.Api** | ASP.NET Core middleware, HTTP integration |
-| **RateLimiter.Core.Tests** | Unit tests for all algorithms and factory |
+| **RateLimiter.Core** | Algoritmos e interfaces, sin dependencias de framework |
+| **RateLimiter.Api** | Middleware ASP.NET Core, integración HTTP |
+| **RateLimiter.Core.Tests** | Tests unitarios para todos los algoritmos y factory |
 
-## Algorithms Implemented
+## Algoritmos Implementados
 
 ### 1. Token Bucket
 
-The classic algorithm. Each client gets a bucket of `N` tokens that refills over a time window. Each request consumes one token.
+El algoritmo clásico. Cada cliente recibe un balde con `N` tokens que se recarga a lo largo de una ventana de tiempo. Cada request consume un token.
 
-**Characteristics:**
-- Allows bursts up to bucket capacity
-- Smooth long-term rate enforcement
-- Constant O(1) memory per client
+**Características:**
+- Permite ráfagas (bursts) hasta la capacidad del balde
+- Enforcement suave de la tasa a largo plazo
+- Memoria constante O(1) por cliente
 
-**Implementation detail:** On each `Acquire` call, we calculate the elapsed time since the last refill and add proportional tokens (capped at max). This avoids background timers and is fully lazy.
+**Detalle de implementación:** En cada llamada a `Acquire`, se calcula el tiempo transcurrido desde la última recarga y se agregan tokens proporcionales (con tope en el máximo). Esto evita timers en background y es completamente lazy.
 
 ### 2. Sliding Window Log
 
-Keeps a timestamped log of every request within the current window. The window slides continuously with real time.
+Mantiene un log con timestamps de cada request dentro de la ventana actual. La ventana se desliza continuamente con el tiempo real.
 
-**Characteristics:**
-- Most accurate — no boundary spikes
-- Higher memory usage: O(N) per client where N = max requests
-- Best for strict rate enforcement
+**Características:**
+- El más preciso — sin picos en los bordes de ventana
+- Mayor uso de memoria: O(N) por cliente donde N = max requests
+- Ideal para enforcement estricto
 
-**Implementation detail:** Uses a `LinkedList<DateTimeOffset>` as a deque — expired entries are evicted from the front on each call. The `RetryAfter` value points exactly to when the oldest entry will expire.
+**Detalle de implementación:** Usa un `LinkedList<DateTimeOffset>` como deque — las entradas expiradas se eliminan desde el frente en cada llamada. El valor de `RetryAfter` apunta exactamente al momento en que la entrada más vieja expirará.
 
 ### 3. Fixed Window Counter
 
-Divides time into discrete windows and counts requests per window.
+Divide el tiempo en ventanas discretas de duración fija y cuenta requests por ventana.
 
-**Characteristics:**
-- Simplest and most memory-efficient: O(1) per client
-- Has a known boundary problem: clients can theoretically send 2× the limit at a window boundary
-- Good for approximate limiting
+**Características:**
+- El más simple y eficiente en memoria: O(1) por cliente
+- Tiene un problema conocido de borde: un cliente puede teóricamente enviar 2× el límite en la frontera entre ventanas
+- Bueno para rate limiting aproximado
 
-**Implementation detail:** Window identity is derived from `UnixTimeMilliseconds / windowMs`, avoiding any state cleanup. The counter naturally resets when the window id changes.
+**Detalle de implementación:** La identidad de la ventana se deriva de `UnixTimeMilliseconds / windowMs`, evitando cualquier limpieza de estado. El contador se resetea naturalmente cuando cambia el id de ventana.
 
-## Key Design Decisions
+## Decisiones de Diseño Clave
 
-### Strategy Pattern over inheritance
+### Strategy Pattern en vez de herencia
 
-The `IRateLimiter` interface allows swapping algorithms without changing the middleware or tests. This is a textbook application of the Strategy pattern and avoids a class hierarchy.
+La interfaz `IRateLimiter` permite intercambiar algoritmos sin modificar el middleware ni los tests. Es una aplicación de libro del patrón Strategy y evita una jerarquía de clases.
 
-### TimeProvider injection for testing
+### Inyección de TimeProvider para testing
 
-All algorithms accept an optional `TimeProvider` parameter (.NET 8 built-in abstraction). Tests inject a `FakeTimeProvider` that allows deterministic time manipulation without `Thread.Sleep` or flaky assertions.
+Todos los algoritmos aceptan un parámetro opcional `TimeProvider` (abstracción built-in de .NET 8). Los tests inyectan un `FakeTimeProvider` que permite manipular el tiempo de forma determinística sin `Thread.Sleep` ni assertions frágiles.
 
-### Thread safety via per-client locking
+### Thread safety mediante lock por cliente
 
-Each client gets their own lock object (the mutable state class itself). This avoids a global lock bottleneck — concurrent requests for different clients never contend. We use `ConcurrentDictionary` for the client → state mapping, which is lock-free for reads.
+Cada cliente obtiene su propio objeto de lock (la clase de estado mutable en sí). Esto evita un cuello de botella con un lock global — requests concurrentes de distintos clientes nunca compiten. Usamos `ConcurrentDictionary` para el mapeo cliente → estado, que es lock-free para lecturas.
 
-### Value-type result
+### Resultado como value type
 
-`RateLimitResult` is a `readonly record struct` — this avoids heap allocations on the hot path (every request goes through the rate limiter).
+`RateLimitResult` es un `readonly record struct` — esto evita allocations en el heap en el hot path (cada request pasa por el rate limiter).
 
-### Middleware in API, not Core
+### Middleware en API, no en Core
 
-The middleware lives in the API project rather than Core. This keeps Core free of ASP.NET Core dependencies, making the algorithms reusable in other contexts (gRPC, background workers, etc.). Trade-off: slightly less convenience as a NuGet package, but avoiding overengineering per the challenge guidelines.
+El middleware vive en el proyecto API y no en Core. Esto mantiene a Core libre de dependencias de ASP.NET Core, haciendo los algoritmos reutilizables en otros contextos (gRPC, background workers, etc.).
 
-## Trade-offs & What I'd Change in Production
+## Trade-offs y Qué Cambiaría en Producción
 
-| Area | Current (Prototype) | Production |
+| Área | Actual (Prototipo) | Producción |
 |---|---|---|
-| **Storage** | In-memory `ConcurrentDictionary` | Redis with Lua scripts for atomicity |
-| **Eviction** | No cleanup of idle clients | TTL-based eviction or LRU cache |
-| **Distributed** | Single-process only | Redis or consistent hashing across nodes |
-| **Rules** | One global rule | Per-endpoint, per-user tier rules |
-| **Config** | Hardcoded in `Program.cs` | `appsettings.json` + hot reload |
-| **Observability** | Response headers only | Prometheus counters + structured logging |
-| **Client identification** | IP address | API key, JWT claims, or composite key |
+| **Storage** | In-memory `ConcurrentDictionary` | Redis con Lua scripts para atomicidad |
+| **Eviction** | Sin limpieza de clientes inactivos | Eviction basado en TTL o LRU cache |
+| **Distribuido** | Solo un proceso | Redis o consistent hashing entre nodos |
+| **Reglas** | Una regla global | Por endpoint, por nivel de usuario |
+| **Config** | Hardcodeado en `Program.cs` | `appsettings.json` + hot reload |
+| **Observabilidad** | Solo headers en response | Contadores Prometheus + logging estructurado |
+| **Identificación de cliente** | Dirección IP | API key, JWT claims, o clave compuesta |
 
-## How I Used AI
+## Uso de AI
 
-I used Claude to help accelerate the implementation while ensuring I understood every line:
+Utilicé herramientas de AI para acelerar la implementación asegurándome de entender cada línea:
 
-- **Scaffolding:** Generated the initial project structure and boilerplate.
-- **Algorithm review:** Discussed algorithm trade-offs and edge cases before coding.
-- **Test cases:** Brainstormed test scenarios, especially concurrency and boundary conditions.
-- **Documentation:** Used AI to draft this design document, which I then revised.
+- **Scaffolding:** Generación de la estructura del proyecto y boilerplate.
+- **Revisión de algoritmos:** Discusión de trade-offs y edge cases antes de codificar.
+- **Casos de test:** Brainstorming de escenarios de test, especialmente concurrencia y condiciones de borde.
+- **Documentación:** Uso de AI para redactar borradores de este documento, que luego revisé y ajusté.
 
-Every function and class is fully understood — no undocumented "black box" code.
+Todo el código es comprendido en su totalidad — no hay código "caja negra" sin documentar.
 
-## How to Run
+## Cómo Ejecutar
 
 ```bash
-# Build
+# Compilar
 dotnet build
 
-# Run tests
+# Correr tests
 dotnet test
 
-# Run the API
+# Levantar la API
 cd src/RateLimiter.Api
 dotnet run
-
-# Test it
-curl -i http://localhost:5000/
-# Repeat rapidly to see 429 responses
-```
